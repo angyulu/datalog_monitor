@@ -1,0 +1,302 @@
+"""Datalog Monitor - local Streamlit viewer for process-log CSV runs."""
+import tkinter as tk
+from tkinter import filedialog
+
+import pandas as pd
+import streamlit as st
+
+from datalog_monitor import storage
+from datalog_monitor.analysis import (
+    compute_all_violations, compute_summary_stats, find_peak_time, find_setpoint_reach_time,
+)
+from datalog_monitor.charts import build_comparison_figure, build_single_run_figure
+from datalog_monitor.scanner import (
+    detect_pv_sv_pairs,
+    get_plain_numeric_channels,
+    load_run,
+    scan_folder,
+    ALIGNMENT_PV_COLUMN,
+    ALIGNMENT_SV_COLUMN,
+    PRESSURE_GROUP_LABEL_COLUMN,
+    PRESSURE_GROUP_NUMERIC,
+)
+
+st.set_page_config(page_title="Datalog Monitor", layout="wide")
+
+DEFAULT_CHANNEL_LABELS = {"Tube Pressure", "651C Pre", "Heater"}
+RECENT_WINDOW_OPTIONS = {"Last 50 runs": 50, "Last 100 runs": 100, "Last 200 runs": 200, "All runs": None}
+
+
+def pick_folder_dialog(initial_dir: str | None) -> str | None:
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes("-topmost", 1)
+    folder = filedialog.askdirectory(initialdir=initial_dir or "")
+    root.destroy()
+    return folder or None
+
+
+def build_plot_item_catalog(columns: list[str]) -> list[dict]:
+    pv_sv_pairs = detect_pv_sv_pairs(columns)
+    plain_channels = get_plain_numeric_channels(columns, pv_sv_pairs)
+
+    catalog = []
+    for channel in PRESSURE_GROUP_NUMERIC:
+        if channel in plain_channels:
+            catalog.append({"kind": "plain", "channel": channel, "label": channel})
+    for name, pv, sv in pv_sv_pairs:
+        catalog.append({"kind": "pvsv", "pair_name": name, "pv_col": pv, "sv_col": sv, "label": name})
+    for channel in plain_channels:
+        if channel not in PRESSURE_GROUP_NUMERIC:
+            catalog.append({"kind": "plain", "channel": channel, "label": channel})
+    return catalog
+
+
+def format_duration(delta: pd.Timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def render_run_table(root_folder: str, mode: str) -> list[str]:
+    """Renders the run list/search/tag-editor and returns the selected file path(s)."""
+    runs = scan_folder(root_folder)
+    st.caption(f"{len(runs)} run(s) found on disk · auto-refreshes every 60s")
+    st.button("Refresh now", key="manual_refresh")
+
+    if not runs:
+        st.info("No CSV files found in this folder.")
+        return []
+
+    tags = storage.load_runcard_tags(root_folder)
+    query = st.text_input("Search (timestamp or runcard)", key="search_query").strip().lower()
+
+    if query:
+        # Search always looks across every run, not just the recent window.
+        candidate_runs = runs
+    else:
+        window_label = st.selectbox("Show", list(RECENT_WINDOW_OPTIONS), key="recent_window")
+        limit = RECENT_WINDOW_OPTIONS[window_label]
+        candidate_runs = runs[:limit] if limit else runs
+
+    table_rows = []
+    row_meta = []
+    for meta in candidate_runs:
+        tag = storage.get_runcard_tag(root_folder, meta.path, tags)
+        if query and query not in f"{meta.start_time:%Y-%m-%d %H:%M:%S} {tag}".lower():
+            continue
+        table_rows.append({
+            "Start": meta.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "Program": meta.first_program,
+            "Rows": meta.row_count,
+            "Duration": format_duration(meta.end_time - meta.start_time),
+            "Runcard": tag,
+        })
+        row_meta.append(meta)
+
+    st.caption(f"Showing {len(table_rows)} run(s)")
+    if not table_rows:
+        return []
+
+    selection_mode = "single-row" if mode == "Single run" else "multi-row"
+    event = st.dataframe(
+        pd.DataFrame(table_rows), hide_index=True, width="stretch",
+        on_select="rerun", selection_mode=selection_mode, key=f"run_table_{mode}",
+    )
+    selected_indices = event.selection.rows if event and event.selection else []
+    selected_metas = [row_meta[i] for i in selected_indices]
+
+    if selected_metas:
+        st.divider()
+        st.caption("Edit runcard tag for the selected run(s):")
+        for meta in selected_metas:
+            tag = storage.get_runcard_tag(root_folder, meta.path, tags)
+            new_tag = st.text_input(
+                f"{meta.start_time:%Y-%m-%d %H:%M:%S}", value=tag, key=f"tag_{meta.path}",
+            )
+            if new_tag != tag:
+                storage.set_runcard_tag(root_folder, meta.path, new_tag)
+
+    return [m.path for m in selected_metas]
+
+
+def render_tolerance_settings(root_folder: str, pv_sv_pairs: list[tuple[str, str, str]]) -> dict:
+    thresholds = storage.load_thresholds(root_folder)
+    with st.expander("PV/SV tolerance settings"):
+        global_default = st.number_input(
+            "Global default tolerance (%)", min_value=0.0, step=0.5,
+            value=float(thresholds["global_default_pct"]), key="global_tolerance",
+        )
+        pair_names = [name for name, _, _ in pv_sv_pairs]
+        rows = pd.DataFrame({
+            "Channel": pair_names,
+            "Tolerance %": [
+                float(thresholds["overrides"].get(name, global_default)) for name in pair_names
+            ],
+        })
+        edited = st.data_editor(rows, hide_index=True, key="tolerance_editor", width="stretch")
+        if st.button("Save tolerance settings"):
+            new_overrides = {
+                row["Channel"]: row["Tolerance %"]
+                for _, row in edited.iterrows()
+                if abs(row["Tolerance %"] - global_default) > 1e-9
+            }
+            storage.save_thresholds(root_folder, {
+                "global_default_pct": global_default, "overrides": new_overrides,
+            })
+            st.rerun()
+    return {"global_default_pct": global_default, "overrides": thresholds["overrides"]}
+
+
+def get_tolerance_pct(thresholds: dict, pair_name: str) -> float:
+    return thresholds.get("overrides", {}).get(pair_name, thresholds["global_default_pct"])
+
+
+def render_single_run_view(df: pd.DataFrame, plot_items: list[dict], pv_sv_pairs, thresholds) -> None:
+    pressure_group_selected = any(
+        i["kind"] == "plain" and i["channel"] in PRESSURE_GROUP_NUMERIC for i in plot_items
+    )
+    if pressure_group_selected and PRESSURE_GROUP_LABEL_COLUMN in df.columns:
+        gauge_values = df[PRESSURE_GROUP_LABEL_COLUMN].dropna().unique()
+        st.caption(f"{PRESSURE_GROUP_LABEL_COLUMN}: {', '.join(str(v) for v in gauge_values)}")
+
+    violations_df, masks = compute_all_violations(df, pv_sv_pairs, thresholds, get_tolerance_pct)
+    fig = build_single_run_figure(df, plot_items, masks)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Summary statistics")
+    all_channels = [i["pv_col"] for i in plot_items if i["kind"] == "pvsv"] + \
+                    [i["sv_col"] for i in plot_items if i["kind"] == "pvsv"] + \
+                    [i["channel"] for i in plot_items if i["kind"] == "plain"]
+    st.dataframe(compute_summary_stats(df, all_channels), width="stretch", hide_index=True)
+
+    st.subheader("Out-of-tolerance violations")
+    if violations_df.empty:
+        st.success("No PV/SV violations found for this run.")
+    else:
+        st.dataframe(violations_df, width="stretch", hide_index=True)
+
+
+def render_comparison_view(root_folder: str, dfs, plot_items: list[dict], pv_sv_pairs, thresholds) -> None:
+    tags = storage.load_runcard_tags(root_folder)
+    run_labels = []
+    align_times = []
+    fallback_labels = []
+    for path, df in dfs:
+        tag = storage.get_runcard_tag(root_folder, path, tags)
+        start = df["Time"].iloc[0]
+        label = f"{start:%Y-%m-%d %H:%M:%S}" + (f" ({tag})" if tag else "")
+        run_labels.append(label)
+
+        align_time = None
+        if ALIGNMENT_PV_COLUMN in df.columns and ALIGNMENT_SV_COLUMN in df.columns:
+            align_time = find_setpoint_reach_time(df, ALIGNMENT_PV_COLUMN, ALIGNMENT_SV_COLUMN)
+        if align_time is None:
+            align_time = find_peak_time(df, ALIGNMENT_PV_COLUMN) if ALIGNMENT_PV_COLUMN in df.columns else None
+            if align_time is None:
+                align_time = start
+            fallback_labels.append(label)
+        align_times.append(align_time)
+
+    if fallback_labels:
+        st.warning(
+            f"{ALIGNMENT_PV_COLUMN} never reached {ALIGNMENT_SV_COLUMN} in: {', '.join(fallback_labels)} "
+            "-- aligned by peak value instead."
+        )
+
+    fig = build_comparison_figure(list(zip(run_labels, [d for _, d in dfs])), plot_items, align_times)
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Summary statistics")
+    all_channels = [i["pv_col"] for i in plot_items if i["kind"] == "pvsv"] + \
+                    [i["sv_col"] for i in plot_items if i["kind"] == "pvsv"] + \
+                    [i["channel"] for i in plot_items if i["kind"] == "plain"]
+    stats_frames = []
+    for run_label, (path, df) in zip(run_labels, dfs):
+        stats = compute_summary_stats(df, all_channels)
+        stats.insert(0, "Run", run_label)
+        stats_frames.append(stats)
+    st.dataframe(pd.concat(stats_frames, ignore_index=True), width="stretch", hide_index=True)
+
+    st.subheader("Out-of-tolerance violations")
+    violation_frames = []
+    for run_label, (path, df) in zip(run_labels, dfs):
+        v_df, _ = compute_all_violations(df, pv_sv_pairs, thresholds, get_tolerance_pct)
+        if not v_df.empty:
+            v_df.insert(0, "Run", run_label)
+            violation_frames.append(v_df)
+    if violation_frames:
+        st.dataframe(pd.concat(violation_frames, ignore_index=True), width="stretch", hide_index=True)
+    else:
+        st.success("No PV/SV violations found across selected runs.")
+
+
+@st.fragment(run_every="60s")
+def render_workspace(root_folder: str, mode: str) -> None:
+    """Run picker + everything downstream of a selection, in one reactive scope.
+
+    Selecting a row is a widget interaction *inside* this fragment, so it must
+    also own the chart/stats rendering -- code outside a fragment does not
+    re-run when only the fragment reruns (a plain st.button/dataframe click
+    inside it would otherwise update session_state with nothing downstream
+    ever seeing the new value until some unrelated full-page rerun happened).
+    Streamlit also doesn't allow a fragment to write to both the sidebar and
+    the main area, so the run table lives here in the main area now.
+    """
+    st.subheader("Runs")
+    selected_paths = render_run_table(root_folder, mode)
+
+    if not selected_paths:
+        st.info("Select a run from the sidebar to view its data.")
+        return
+
+    dfs = [(path, load_run(path)) for path in selected_paths]
+    columns = list(dfs[0][1].columns)
+    catalog = build_plot_item_catalog(columns)
+    pv_sv_pairs = [(i["pair_name"], i["pv_col"], i["sv_col"]) for i in catalog if i["kind"] == "pvsv"]
+
+    thresholds = render_tolerance_settings(root_folder, pv_sv_pairs)
+
+    labels = [item["label"] for item in catalog]
+    default_labels = [label for label in labels if label in DEFAULT_CHANNEL_LABELS]
+    selected_labels = st.multiselect("Channels to plot", labels, default=default_labels)
+    plot_items = [item for item in catalog if item["label"] in selected_labels]
+
+    if not plot_items:
+        st.info("Select at least one channel to plot.")
+        return
+
+    if mode == "Single run":
+        render_single_run_view(dfs[0][1], plot_items, pv_sv_pairs, thresholds)
+    else:
+        render_comparison_view(root_folder, dfs, plot_items, pv_sv_pairs, thresholds)
+
+
+def main() -> None:
+    st.title("Datalog Monitor")
+
+    if "root_folder" not in st.session_state:
+        st.session_state.root_folder = storage.get_last_folder() or ""
+
+    st.sidebar.header("Data folder")
+    st.sidebar.text_input("Current folder", value=st.session_state.root_folder, disabled=True)
+    if st.sidebar.button("Browse…"):
+        folder = pick_folder_dialog(st.session_state.root_folder)
+        if folder:
+            st.session_state.root_folder = folder
+            storage.set_last_folder(folder)
+            st.rerun()
+
+    root_folder = st.session_state.root_folder
+    if not root_folder:
+        st.info("Choose a data folder from the sidebar to get started.")
+        return
+
+    mode = st.sidebar.radio("View mode", ["Single run", "Compare runs"])
+
+    render_workspace(root_folder, mode)
+
+
+if __name__ == "__main__":
+    main()

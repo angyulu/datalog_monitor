@@ -1,0 +1,19 @@
+# Instance-specific local state (per-machine, not part of the app)
+config.json
+version.json
+
+# Real process data and its sidecar files -- never belongs in the repo
+HA_DataRecord/
+runcard_tags.json
+thresholds.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Portable build output (large binary artifact, distributed separately)
+dist/
+
+# Editor/tooling
+.claude/settings.local.json
+*.log
