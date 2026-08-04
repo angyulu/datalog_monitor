@@ -1,6 +1,5 @@
 """Datalog Monitor - local Streamlit viewer for process-log CSV runs."""
-import tkinter as tk
-from tkinter import filedialog
+import subprocess
 
 import pandas as pd
 import streamlit as st
@@ -27,13 +26,40 @@ DEFAULT_CHANNEL_LABELS = {"Tube Pressure", "651C Pre", "Heater"}
 RECENT_WINDOW_OPTIONS = {"Last 50 runs": 50, "Last 100 runs": 100, "Last 200 runs": 200, "All runs": None}
 
 
+def _ps_single_quote(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+
 def pick_folder_dialog(initial_dir: str | None) -> str | None:
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", 1)
-    folder = filedialog.askdirectory(initialdir=initial_dir or "")
-    root.destroy()
-    return folder or None
+    """Native folder picker via PowerShell + WinForms.
+
+    Not tkinter: the Windows embeddable Python distribution used for the
+    portable/no-install build doesn't ship tkinter at all, and PowerShell's
+    WinForms are present on every Windows machine with no bundling needed.
+    """
+    initial_dir_literal = _ps_single_quote(initial_dir) if initial_dir else "''"
+    script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select the data folder'
+$initial = {initial_dir_literal}
+if ($initial -and (Test-Path $initial)) {{
+    $dialog.SelectedPath = $initial
+}}
+$dialog.ShowNewFolderButton = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dialog.SelectedPath
+}}
+"""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    path = result.stdout.strip()
+    return path or None
 
 
 def build_plot_item_catalog(columns: list[str]) -> list[dict]:
