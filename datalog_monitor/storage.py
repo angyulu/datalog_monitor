@@ -70,6 +70,17 @@ def get_runcard_tag(root_folder: str, file_path: str, tags: dict | None = None) 
     return tags.get(_relative_key(root_folder, file_path), "")
 
 
+def move_runcard_tag(root_folder: str, old_path: str, new_path: str) -> None:
+    """Re-key a run's tag entry after its file has been renamed on disk."""
+    tags = load_runcard_tags(root_folder)
+    old_key = _relative_key(root_folder, old_path)
+    if old_key not in tags:
+        return
+    new_key = _relative_key(root_folder, new_path)
+    tags[new_key] = tags.pop(old_key)
+    _write_json(Path(root_folder) / RUNCARD_TAGS_FILENAME, tags)
+
+
 # ---- thresholds (sidecar file inside the selected data folder) ----
 
 def load_thresholds(root_folder: str) -> dict:

@@ -1,10 +1,11 @@
 """Datalog Monitor - local Streamlit viewer for process-log CSV runs."""
 import subprocess
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from datalog_monitor import storage
+from datalog_monitor import renamer, storage
 from datalog_monitor.analysis import (
     compute_all_violations, compute_summary_stats, find_peak_time, find_setpoint_reach_time,
 )
@@ -143,6 +144,19 @@ def render_run_table(root_folder: str, mode: str) -> list[str]:
             )
             if new_tag != tag:
                 storage.set_runcard_tag(root_folder, meta.path, new_tag)
+
+            plan = renamer.plan_single_rename(root_folder, meta)
+            if plan.will_change:
+                if st.button(f"Rename file to {Path(plan.new_path).name}", key=f"rename_{meta.path}"):
+                    try:
+                        renamer.apply_rename(root_folder, plan)
+                    except (renamer.RenameCollision, OSError) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(f"Renamed to {Path(plan.new_path).name}")
+                        st.rerun()
+            else:
+                st.caption("Filename already matches this tag.")
 
     return [m.path for m in selected_metas]
 
@@ -299,6 +313,56 @@ def render_workspace(root_folder: str, mode: str) -> None:
         render_comparison_view(root_folder, dfs, plot_items, pv_sv_pairs, thresholds)
 
 
+def render_bulk_rename(root_folder: str) -> None:
+    """Sidebar control to sweep the whole folder tree, renaming every run to
+    <timestamp>[~tag].csv so filenames stay consistent for downstream analysis.
+
+    Recomputes every target name from current data each time, so it also
+    fixes files that were renamed earlier but whose tag has since changed.
+    """
+    st.sidebar.divider()
+    st.sidebar.subheader("Bulk rename")
+    st.sidebar.caption("Rename every run in this folder (recursively) to match its tag.")
+
+    if st.sidebar.button("Preview rename all"):
+        st.session_state.rename_plans = [p for p in renamer.plan_renames(root_folder) if p.will_change]
+        st.session_state.rename_result = None
+
+    plans = st.session_state.get("rename_plans")
+    if plans is not None:
+        if not plans:
+            st.sidebar.info("Every filename already matches its tag.")
+            st.session_state.rename_plans = None
+        else:
+            st.sidebar.write(f"{len(plans)} file(s) will change:")
+            st.sidebar.dataframe(
+                pd.DataFrame([
+                    {
+                        "Current name": Path(p.path).name,
+                        "New name": Path(p.new_path).name,
+                        "Status": "Collision - will be skipped" if p.collision else "OK",
+                    }
+                    for p in plans
+                ]),
+                hide_index=True, width="stretch",
+            )
+            col1, col2 = st.sidebar.columns(2)
+            if col1.button("Confirm rename all"):
+                st.session_state.rename_result = renamer.execute_sweep(root_folder, plans)
+                st.session_state.rename_plans = None
+                st.rerun()
+            if col2.button("Cancel"):
+                st.session_state.rename_plans = None
+                st.rerun()
+
+    result = st.session_state.get("rename_result")
+    if result is not None:
+        st.sidebar.success(f"Renamed {len(result.renamed)} file(s).")
+        if result.skipped:
+            details = "\n".join(f"- {Path(p).name}: {reason}" for p, reason in result.skipped)
+            st.sidebar.warning(f"Skipped {len(result.skipped)} file(s):\n{details}")
+
+
 def main() -> None:
     st.title("Datalog Monitor")
 
@@ -318,6 +382,8 @@ def main() -> None:
     if not root_folder:
         st.info("Choose a data folder from the sidebar to get started.")
         return
+
+    render_bulk_rename(root_folder)
 
     mode = st.sidebar.radio("View mode", ["Single run", "Compare runs"])
 
