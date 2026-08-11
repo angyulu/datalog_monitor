@@ -129,7 +129,11 @@ def render_run_table(root_folder: str, mode: str) -> list[str]:
         on_select="rerun", selection_mode=selection_mode, key=f"run_table_{mode}",
     )
     selected_indices = event.selection.rows if event and event.selection else []
-    selected_metas = [row_meta[i] for i in selected_indices]
+    # A selection can carry over from before the row set shrank (narrowing the
+    # search, a smaller "Show" window, or the periodic re-scan finding fewer
+    # matching runs) -- st.dataframe's selection is keyed by row position, not
+    # by run identity, so a stale index needs to be dropped rather than crash.
+    selected_metas = [row_meta[i] for i in selected_indices if i < len(row_meta)]
 
     if selected_metas:
         st.divider()
