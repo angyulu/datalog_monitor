@@ -70,32 +70,23 @@ def _build_segment(df, pair_name, deviation_pct, start_idx, end_idx) -> dict:
     }
 
 
-def find_setpoint_reach_time(df: pd.DataFrame, pv_col: str, sv_col: str) -> pd.Timestamp | None:
-    """First timestamp at which PV reaches the run's peak SV (the growth setpoint).
+def find_final_plateau_start(df: pd.DataFrame, column: str) -> pd.Timestamp | None:
+    """First timestamp of the *last* run of rows sitting at the column's max value.
 
-    SV can sit at a static ceiling value before the real ramp begins (e.g. "900"
-    from row 0, while the heater isn't actually being driven there yet), so
-    comparing PV against the *moment-to-moment* SV can find a trivial early
-    crossing instead of the real one. Using the run's peak SV as a fixed target
-    avoids that: it's the highest value the process ever actually commands, and
-    PV crossing into it is the genuine "reached growth temperature" moment.
+    A setpoint column can sit at its ceiling value from row 0 (a static config
+    value logged before the real ramp begins), so the first occurrence of the
+    max is a trivial early match. Taking the last upward crossing into the max
+    instead finds the genuine "settled at the final setpoint" moment.
     """
-    target = df[sv_col].max()
+    target = df[column].max()
     if pd.isna(target):
         return None
-    reached = df[pv_col] >= target
-    if not reached.any():
+    at_max = df[column] >= target
+    rising_edges = at_max & ~at_max.shift(1, fill_value=False)
+    if not rising_edges.any():
         return None
-    first_idx = reached.idxmax()  # idxmax on a bool Series returns the first True
-    return df.loc[first_idx, TIME_COLUMN]
-
-
-def find_peak_time(df: pd.DataFrame, column: str) -> pd.Timestamp | None:
-    """Timestamp of the maximum value in a channel."""
-    series = df[column].dropna()
-    if series.empty:
-        return None
-    return df.loc[series.idxmax(), TIME_COLUMN]
+    last_edge_idx = df.index[rising_edges][-1]
+    return df.loc[last_edge_idx, TIME_COLUMN]
 
 
 def compute_all_violations(df: pd.DataFrame, pv_sv_pairs: list[tuple[str, str, str]], thresholds: dict, get_tolerance_pct) -> tuple[pd.DataFrame, dict]:

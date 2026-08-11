@@ -6,16 +6,13 @@ import pandas as pd
 import streamlit as st
 
 from datalog_monitor import renamer, storage
-from datalog_monitor.analysis import (
-    compute_all_violations, compute_summary_stats, find_peak_time, find_setpoint_reach_time,
-)
+from datalog_monitor.analysis import compute_all_violations, compute_summary_stats, find_final_plateau_start
 from datalog_monitor.charts import build_comparison_figure, build_single_run_figure
 from datalog_monitor.scanner import (
     detect_pv_sv_pairs,
     get_plain_numeric_channels,
     load_run,
     scan_folder,
-    ALIGNMENT_PV_COLUMN,
     ALIGNMENT_SV_COLUMN,
     PRESSURE_GROUP_LABEL_COLUMN,
     PRESSURE_GROUP_NUMERIC,
@@ -226,23 +223,19 @@ def render_comparison_view(root_folder: str, dfs, plot_items: list[dict], pv_sv_
     for path, df in dfs:
         tag = storage.get_runcard_tag(root_folder, path, tags)
         start = df["Time"].iloc[0]
-        label = f"{start:%Y-%m-%d %H:%M:%S}" + (f" ({tag})" if tag else "")
+        label = (f"{tag} " if tag else "") + f"{start:%Y-%m-%d %H:%M:%S}"
         run_labels.append(label)
 
-        align_time = None
-        if ALIGNMENT_PV_COLUMN in df.columns and ALIGNMENT_SV_COLUMN in df.columns:
-            align_time = find_setpoint_reach_time(df, ALIGNMENT_PV_COLUMN, ALIGNMENT_SV_COLUMN)
+        align_time = find_final_plateau_start(df, ALIGNMENT_SV_COLUMN) if ALIGNMENT_SV_COLUMN in df.columns else None
         if align_time is None:
-            align_time = find_peak_time(df, ALIGNMENT_PV_COLUMN) if ALIGNMENT_PV_COLUMN in df.columns else None
-            if align_time is None:
-                align_time = start
+            align_time = start
             fallback_labels.append(label)
         align_times.append(align_time)
 
     if fallback_labels:
         st.warning(
-            f"{ALIGNMENT_PV_COLUMN} never reached {ALIGNMENT_SV_COLUMN} in: {', '.join(fallback_labels)} "
-            "-- aligned by peak value instead."
+            f"{ALIGNMENT_SV_COLUMN} not available in: {', '.join(fallback_labels)} "
+            "-- aligned by run start time instead."
         )
 
     fig = build_comparison_figure(list(zip(run_labels, [d for _, d in dfs])), plot_items, align_times)

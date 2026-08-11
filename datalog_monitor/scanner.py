@@ -16,9 +16,8 @@ CATEGORICAL_COLUMNS = {"Auto Action", "Program", "651C Gauge"}
 PRESSURE_GROUP_NUMERIC = ["Tube Pressure", "651C Pre", "651C Ang"]
 PRESSURE_GROUP_LABEL_COLUMN = "651C Gauge"
 
-# Comparison-mode runs are aligned on when this PV first reaches its SV
-# (i.e. when the growth temperature is reached), not on run start time.
-ALIGNMENT_PV_COLUMN = "Heater PV"
+# Comparison-mode runs are aligned on when this SV reaches its peak
+# (the commanded growth-temperature setpoint), not on run start time.
 ALIGNMENT_SV_COLUMN = "Heater SV"
 
 
