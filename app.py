@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from datalog_monitor import renamer, storage
+from datalog_monitor import __version__, renamer, storage
 from datalog_monitor.analysis import compute_all_violations, compute_summary_stats, find_final_plateau_start
 from datalog_monitor.charts import build_comparison_figure, build_single_run_figure
 from datalog_monitor.scanner import (
@@ -362,6 +362,7 @@ def render_bulk_rename(root_folder: str) -> None:
 
 def main() -> None:
     st.title("Datalog Monitor")
+    st.caption(f"v{__version__}")
 
     if "root_folder" not in st.session_state:
         st.session_state.root_folder = storage.get_last_folder() or ""
