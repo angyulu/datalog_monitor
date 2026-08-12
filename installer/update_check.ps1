@@ -33,6 +33,65 @@ $destApp = Join-Path $RootDir "app.py"
 $destPkg = Join-Path $RootDir "datalog_monitor"
 $destPages = Join-Path $RootDir "pages"
 
+# --- Self-update ---------------------------------------------------------
+# This script is not one of the files the swap below applies (app.py,
+# datalog_monitor/, pages/, requirements.txt) -- it's the thing doing the
+# swapping. Without this step, a bug fixed here would never reach an
+# already-installed copy: it would keep running its own stale logic on every
+# future launch forever, no matter what gets pushed to GitHub, because the
+# only code capable of fetching the fix is the exact code that needs it.
+#
+# Refresh this file first, in its own short-lived step, then hand off to a
+# freshly-launched process running the new copy -- a script must not keep
+# executing after replacing the file it was loaded from. Guarded by an env
+# var so a relaunch can never loop more than once even if content still
+# compares as different for some benign reason.
+if (-not $env:DATALOG_MONITOR_UPDATER_RELAUNCHED) {
+    $selfPath = $PSCommandPath
+    $selfBackup = "$selfPath.bak"
+    $stagedSelf = "$selfPath.new"
+    try {
+        if (-not (Test-Path $selfPath) -and (Test-Path $selfBackup)) {
+            Rename-Item -Path $selfBackup -NewName (Split-Path $selfPath -Leaf)
+        }
+        if (Test-Path $stagedSelf) { Remove-Item -Path $stagedSelf -Force -ErrorAction SilentlyContinue }
+
+        $headers = @{ "User-Agent" = "DatalogMonitorUpdater" }
+        Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch/installer/update_check.ps1" `
+            -Headers $headers -OutFile $stagedSelf -TimeoutSec 10
+
+        $selfChanged = $true
+        if (Test-Path $selfPath) {
+            $oldHash = (Get-FileHash -Path $selfPath -Algorithm SHA256).Hash
+            $newHash = (Get-FileHash -Path $stagedSelf -Algorithm SHA256).Hash
+            $selfChanged = $oldHash -ne $newHash
+        }
+
+        if ($selfChanged) {
+            if (Test-Path $selfBackup) { Remove-Item -Path $selfBackup -Force -ErrorAction SilentlyContinue }
+            try {
+                Rename-Item -Path $selfPath -NewName (Split-Path $selfBackup -Leaf)
+                Rename-Item -Path $stagedSelf -NewName (Split-Path $selfPath -Leaf)
+            } catch {
+                if ((Test-Path $selfBackup) -and -not (Test-Path $selfPath)) {
+                    Rename-Item -Path $selfBackup -NewName (Split-Path $selfPath -Leaf) -ErrorAction SilentlyContinue
+                }
+                throw
+            }
+            Remove-Item -Path $selfBackup -Force -ErrorAction SilentlyContinue
+
+            $env:DATALOG_MONITOR_UPDATER_RELAUNCHED = "1"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $selfPath
+            exit $LASTEXITCODE
+        } else {
+            Remove-Item -Path $stagedSelf -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "Self-update check skipped (will retry next launch): $($_.Exception.Message)"
+    }
+}
+
 # Self-heal: if a previous update was killed mid-swap (live copy renamed to
 # .bak, staged copy never renamed into place), restore the backup so the app
 # can still launch with whatever was last known-good. Each item is independent
