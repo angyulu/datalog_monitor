@@ -1,23 +1,25 @@
 # Silently checks GitHub for a newer commit on main; if found, downloads and applies
-# updated app files (app.py, datalog_monitor/, requirements.txt) in place.
+# updated app files (app.py, datalog_monitor/, pages/, requirements.txt) in place.
 # Any failure here (offline, GitHub unreachable, etc.) is swallowed -- this must
 # never block launching the app with whatever is already installed.
 #
-# The swap itself is rename-based (not copy-over-live / delete-then-copy): app.py
-# and datalog_monitor/ are staged next to the live copies, then swapped into place
-# with Rename-Item, which is a single fast filesystem op rather than walking every
-# file. If a lock (e.g. antivirus scanning the freshly-extracted files) or any
-# other failure interrupts the swap partway through, whatever already landed is
-# rolled back so app.py and datalog_monitor/ never end up paired from two
-# different commits (which throws an ImportError on launch). version.json is only
+# The swap itself is rename-based (not copy-over-live / delete-then-copy): app.py,
+# datalog_monitor/, and pages/ are staged next to the live copies, then swapped
+# into place with Rename-Item, which is a single fast filesystem op rather than
+# walking every file. If a lock (e.g. antivirus scanning the freshly-extracted
+# files) or any other failure interrupts the swap partway through, whatever
+# already landed is rolled back so app.py, datalog_monitor/, and pages/ never end
+# up paired from two different commits (which throws an ImportError, or a
+# StreamlitAPIException for a missing page, on launch). version.json is only
 # written once every file has been swapped in successfully.
 #
 # Most filesystem cmdlets (Rename-Item, Copy-Item, Remove-Item) report failures
 # as *non-terminating* errors by default -- a bare try/catch around them does
 # NOT catch a locked/in-use file, it just prints a warning and carries on to
-# the next line, which is how app.py and datalog_monitor/ could end up on two
-# different commits with no exception ever being raised. Forcing every error to
-# be terminating here is what makes the try/catch (and the rollback) actually work.
+# the next line, which is how app.py, datalog_monitor/, and pages/ could end up
+# on different commits with no exception ever being raised. Forcing every error
+# to be terminating here is what makes the try/catch (and the rollback) actually
+# work.
 $ErrorActionPreference = "Stop"
 
 $RepoOwner = "angyulu"
@@ -29,13 +31,14 @@ $VersionFile = Join-Path $RootDir "version.json"
 $PythonExe = Join-Path $RootDir "python\python.exe"
 $destApp = Join-Path $RootDir "app.py"
 $destPkg = Join-Path $RootDir "datalog_monitor"
+$destPages = Join-Path $RootDir "pages"
 
 # Self-heal: if a previous update was killed mid-swap (live copy renamed to
 # .bak, staged copy never renamed into place), restore the backup so the app
 # can still launch with whatever was last known-good. Each item is independent
 # and best-effort -- one failing here must not stop the other from being
 # checked, or stop the update check below from running.
-foreach ($live in @($destApp, $destPkg)) {
+foreach ($live in @($destApp, $destPkg, $destPages)) {
     $backup = "$live.bak"
     if (-not (Test-Path $live) -and (Test-Path $backup)) {
         try { Rename-Item -Path $backup -NewName (Split-Path $live -Leaf) } catch {}
@@ -83,7 +86,14 @@ try {
     $latestSha = $latest.sha
     $installedSha = Get-InstalledSha
 
-    if ($installedSha -eq $latestSha) {
+    # An install can have version.json pinned at the latest sha yet still be
+    # missing pages/ -- e.g. a machine updated by a pre-fix version of this
+    # script, which recorded success without ever fetching the (then-new)
+    # pages/ folder. Treat that as not up to date so it self-heals here
+    # instead of silently staying broken forever.
+    $pagesMissing = -not (Test-Path $destPages)
+
+    if ($installedSha -eq $latestSha -and -not $pagesMissing) {
         Write-Host "Datalog Monitor is up to date ($($latestSha.Substring(0,7)))."
         exit 0
     }
@@ -105,6 +115,7 @@ try {
 
     $srcApp = Join-Path $extractedDir.FullName "app.py"
     $srcPkg = Join-Path $extractedDir.FullName "datalog_monitor"
+    $srcPages = Join-Path $extractedDir.FullName "pages"
     $srcReq = Join-Path $extractedDir.FullName "requirements.txt"
     $destReq = Join-Path $RootDir "requirements.txt"
 
@@ -115,25 +126,36 @@ try {
         $reqChanged = $oldHash -ne $newHash
     }
 
-    # Stage the new package/app next to the live ones (same volume, so the
-    # swap below is a fast rename) before touching anything live.
+    # Stage the new package/app/pages next to the live ones (same volume, so
+    # the swap below is a fast rename) before touching anything live.
     $stagedPkg = Join-Path $RootDir "datalog_monitor.new"
     $stagedApp = Join-Path $RootDir "app.py.new"
+    $stagedPages = Join-Path $RootDir "pages.new"
     if (Test-Path $stagedPkg) { Remove-Item -Path $stagedPkg -Recurse -Force }
     if (Test-Path $stagedApp) { Remove-Item -Path $stagedApp -Force }
+    if (Test-Path $stagedPages) { Remove-Item -Path $stagedPages -Recurse -Force }
     Copy-Item -Path $srcPkg -Destination $stagedPkg -Recurse -Force
     Copy-Item -Path $srcApp -Destination $stagedApp -Force
+    Copy-Item -Path $srcPages -Destination $stagedPages -Recurse -Force
 
     $pkgBackup = $null
     $appBackup = $null
+    $pagesBackup = $null
     $pkgApplied = $false
+    $pagesApplied = $false
     try {
         $pkgBackup = Swap-IntoPlace -LivePath $destPkg -NewPath $stagedPkg
         $pkgApplied = $true
+        $pagesBackup = Swap-IntoPlace -LivePath $destPages -NewPath $stagedPages
+        $pagesApplied = $true
         $appBackup = Swap-IntoPlace -LivePath $destApp -NewPath $stagedApp
     } catch {
         # app.py's own swap already rolled itself back internally if that's
-        # what failed -- only the package swap needs undoing here.
+        # what failed -- only the package/pages swaps need undoing here.
+        if ($pagesApplied -and $pagesBackup) {
+            if (Test-Path $destPages) { Remove-Item -Path $destPages -Recurse -Force -ErrorAction SilentlyContinue }
+            Rename-Item -Path $pagesBackup -NewName (Split-Path $destPages -Leaf) -ErrorAction SilentlyContinue
+        }
         if ($pkgApplied -and $pkgBackup) {
             if (Test-Path $destPkg) { Remove-Item -Path $destPkg -Recurse -Force -ErrorAction SilentlyContinue }
             Rename-Item -Path $pkgBackup -NewName (Split-Path $destPkg -Leaf) -ErrorAction SilentlyContinue
@@ -153,6 +175,7 @@ try {
 
     if ($pkgBackup) { Remove-Item -Path $pkgBackup -Recurse -Force -ErrorAction SilentlyContinue }
     if ($appBackup) { Remove-Item -Path $appBackup -Force -ErrorAction SilentlyContinue }
+    if ($pagesBackup) { Remove-Item -Path $pagesBackup -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "Updated to $($latestSha.Substring(0,7))."
 }

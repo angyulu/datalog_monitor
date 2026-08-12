@@ -48,6 +48,7 @@ Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPipPa
 Write-Host "Copying app code..."
 Copy-Item -Path (Join-Path $RepoRoot "app.py") -Destination $DistDir -Force
 Copy-Item -Path (Join-Path $RepoRoot "datalog_monitor") -Destination $DistDir -Recurse -Force
+Copy-Item -Path (Join-Path $RepoRoot "pages") -Destination $DistDir -Recurse -Force
 Copy-Item -Path (Join-Path $RepoRoot "requirements.txt") -Destination $DistDir -Force
 
 # --- 4. Install dependencies into the embedded runtime ---
