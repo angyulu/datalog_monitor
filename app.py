@@ -389,4 +389,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Explicit st.Page list rather than relying on the pages/ folder's
+    # implicit auto-discovery: that would label this entry "app" in the
+    # sidebar (derived straight from the app.py filename), and renaming the
+    # file itself would ripple into installer/update_check.ps1's atomic
+    # rename-based swap, which is built specifically around the literal
+    # filename "app.py". This relabels just the sidebar without touching
+    # the on-disk entry point the installer/launcher/updater all depend on.
+    st.navigation([
+        st.Page(main, title="Datalog", default=True),
+        st.Page("pages/1_Runcard_Check.py", title="Runcard Check"),
+        st.Page("pages/2_Split_Table.py", title="Split Table"),
+        st.Page("pages/3_Runcard_View.py", title="Runcard View"),
+    ]).run()

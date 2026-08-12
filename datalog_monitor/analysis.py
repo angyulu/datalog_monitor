@@ -76,16 +76,35 @@ def find_final_plateau_start(df: pd.DataFrame, column: str) -> pd.Timestamp | No
     A setpoint column can sit at its ceiling value from row 0 (a static config
     value logged before the real ramp begins), so the first occurrence of the
     max is a trivial early match. Taking the last upward crossing into the max
-    instead finds the genuine "settled at the final setpoint" moment.
+    instead finds the genuine "settled at the final setpoint" moment -- but
+    only if the run's true final setpoint is itself the column's global max.
+    It can be a leftover from whatever ran on the controller *before* this
+    run started, rather than anything this run's own recipe commands -- and
+    if that stale leftover happens to be numerically higher than this run's
+    real final setpoint (confirmed empirically: one real run's "Heater SV"
+    reads 910 for its first ~17 minutes, a leftover from the previous run,
+    then drops and ramps back up to its actual 850 target -- 850 being both
+    the runcard's own commanded ramp target and every other run's plateau),
+    the real plateau never reaches back up to that stale ceiling at all, and
+    the "last rising edge into max" degenerates to matching only the row-0
+    artifact. So the leading block of row 0's value is excluded before
+    computing the target -- it's excluded only from the *target search*, not
+    from the "last rising edge" scan, which still runs over the full column.
     """
-    target = df[column].max()
+    series = df[column]
+    if series.empty:
+        return None
+    first_value = series.iloc[0]
+    changed = series != first_value
+    search_series = series.loc[series.index[changed][0]:] if changed.any() else series
+    target = search_series.max()
     if pd.isna(target):
         return None
-    at_max = df[column] >= target
+    at_max = series >= target
     rising_edges = at_max & ~at_max.shift(1, fill_value=False)
     if not rising_edges.any():
         return None
-    last_edge_idx = df.index[rising_edges][-1]
+    last_edge_idx = series.index[rising_edges][-1]
     return df.loc[last_edge_idx, TIME_COLUMN]
 
 

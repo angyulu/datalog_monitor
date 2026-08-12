@@ -16,6 +16,7 @@ Commands split into two kinds:
 import csv
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 BACKBONE_COMMANDS = {"Wait", "Pumping Forward", "End"}
 
@@ -103,3 +104,34 @@ def target_value(cmd: RuncardCommand) -> float | None:
         return float(cmd.params[0])
     except (IndexError, ValueError):
         return None
+
+
+def list_runcards(folder: str) -> list[str]:
+    """Every CSV under `folder` (recursive) that looks like an actual runcard.
+
+    `parse_runcard`'s row-shape check alone is loose enough that a stray
+    non-runcard CSV (e.g. a datalog, whose header row also has >=3
+    comma-fields) would "successfully parse" into a non-empty command list --
+    so this also requires that at least one command actually advances the
+    clock (a real recipe always does; a same-shaped-but-wrong file won't).
+    Import of growth_window is deferred: growth_window imports this module,
+    so importing it back at module load time would cycle.
+    """
+    from . import growth_window
+
+    root = Path(folder)
+    if not root.is_dir():
+        return []
+
+    runcards = []
+    for path in sorted(root.rglob("*.csv")):
+        try:
+            commands = parse_runcard(str(path))
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not commands:
+            continue
+        if growth_window.build_timeline(commands).total_time <= 0:
+            continue
+        runcards.append(str(path))
+    return runcards
